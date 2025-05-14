@@ -1,0 +1,127 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Permission Audit Tool</title>
+  <link rel="stylesheet" href="https://pyscript.net/latest/pyscript.css" />
+  <script defer src="https://pyscript.net/latest/pyscript.js"></script>
+  <style>
+    body { font-family: sans-serif; padding: 2rem; }
+    #main-app { display: none; }
+    .hidden { display: none; }
+  </style>
+</head>
+<body>
+  <div id="login-form">
+    <h2>Login</h2>
+    <input type="text" id="username" placeholder="Username" /><br><br>
+    <input type="password" id="password" placeholder="Password" /><br><br>
+    <button onclick="checkLogin()">Login</button>
+    <p id="login-error" style="color: red;"></p>
+  </div>
+
+  <div id="main-app">
+    <h1>Upload Audit CSV</h1>
+    <input type="file" id="file-input" accept=".csv" />
+    <button onclick="processCSV()">Run Analysis</button><br><br>
+    <a id="download-link" style="display:none;">Download Result</a>
+
+    <py-script>
+import pandas as pd
+import js
+import io
+
+def processCSV():
+    file = js.document.getElementById("file-input").files.item(0)
+    if not file:
+        js.alert("Please upload a CSV file first.")
+        return
+
+    reader = js.FileReader.new()
+    reader.onload = lambda e: handle_file(e.target.result)
+    reader.readAsText(file)
+
+def handle_file(csv_text):
+    try:
+        df = pd.read_csv(io.StringIO(csv_text))
+        df['occurred_at'] = pd.to_datetime(df['occurred_at'])
+
+        def parse_permissions(row):
+            try:
+                return eval(row)
+            except:
+                return None
+
+        df['parsed_permissions'] = df['advanced_permissions'].apply(parse_permissions)
+        df = df[df['parsed_permissions'].notnull()]
+
+        def extract_permission_names(perms):
+            names = set()
+            if isinstance(perms, list):
+                for item in perms:
+                    for perm in item:
+                        name = perm.get("name")
+                        if isinstance(name, str) and ":" in name:
+                            names.add(name)
+            return names
+
+        df['permissions'] = df['parsed_permissions'].apply(extract_permission_names)
+        df = df.sort_values(by=['resource_id', 'occurred_at'])
+        df['prev_permissions'] = df.groupby('resource_id')['permissions'].shift()
+        df['added'] = df.apply(lambda row: row['permissions'] - row['prev_permissions']
+                               if pd.notnull(row['prev_permissions']) else row['permissions'], axis=1)
+        df['removed'] = df.apply(lambda row: row['prev_permissions'] - row['permissions']
+                                 if pd.notnull(row['prev_permissions']) else set(), axis=1)
+
+        added_records = df[df['added'].apply(lambda x: len(x) > 0)][['resource_id', 'occurred_at', 'identity', 'added']]
+        removed_records = df[df['removed'].apply(lambda x: len(x) > 0)][['resource_id', 'occurred_at', 'identity', 'removed']]
+
+        added_expanded = added_records.explode('added')
+        added_expanded['change'] = 'added'
+        added_expanded.rename(columns={'added': 'full_permission'}, inplace=True)
+
+        removed_expanded = removed_records.explode('removed')
+        removed_expanded['change'] = 'removed'
+        removed_expanded.rename(columns={'removed': 'full_permission'}, inplace=True)
+
+        combined = pd.concat([added_expanded, removed_expanded])
+        combined[['permission_type', 'permission_id']] = combined['full_permission'].str.split(':', n=1, expand=True)
+        final = combined[['resource_id', 'occurred_at', 'identity', 'change', 'permission_type', 'permission_id']]
+        final = final.sort_values(by='occurred_at')
+
+        output_csv = final.to_csv(index=False)
+        blob = js.Blob.new([output_csv], { "type": "text/csv" })
+        url = js.URL.createObjectURL(blob)
+        link = js.document.getElementById("download-link")
+        link.href = url
+        link.download = "all_permission_changes.csv"
+        link.style.display = "inline"
+        link.innerText = "Download Result CSV"
+    except Exception as e:
+        js.alert(f"Error: {str(e)}")
+    </py-script>
+  </div>
+
+  <script>
+    function checkLogin() {
+      const username = document.getElementById("username").value;
+      const password = document.getElementById("password").value;
+
+      const validUsername = "audituser";
+      const validPassword = "letmein123";
+
+      if (username === validUsername && password === validPassword) {
+        document.getElementById("login-form").style.display = "none";
+        document.getElementById("main-app").style.display = "block";
+      } else {
+        document.getElementById("login-error").innerText = "Invalid login";
+      }
+    }
+
+    function processCSV() {
+      pyodide.runPythonAsync("processCSV()")
+    }
+  </script>
+</body>
+</html>
